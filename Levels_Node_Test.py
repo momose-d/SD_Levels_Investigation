@@ -2,15 +2,25 @@
 import os
 import gc
 import sys
+import shutil
 import numpy
 import random as rd
 from pysbs import context, sbsenum, sbsarchive, batchtools
 from PIL import Image
+from multiprocessing import Pool
+import multiprocessing as multi
+
+Y_USE_MULTITHREAD   = True
+Y_OUTPUT_PATH_BASE  = './tmp/'
+Y_OUTPUT_PATH_LOG   = Y_OUTPUT_PATH_BASE + 'log/'
+Y_OUTPUT_PATH_IMG   = Y_OUTPUT_PATH_BASE + 'img/'
+Y_OUTPUT_IMG_EXT    = 'tga'
+Y_PARAM_STEP        = 0.05
+Y_PARAM_STEP_NUM    = int(1.0 / Y_PARAM_STEP) + 1
 
 def get_gpu_engine_for_platform():
     """
     Gets the gpu engine string for the current platform
-
     :return: string the gpu engine string
     """
     from sys import platform
@@ -26,7 +36,6 @@ def get_gpu_engine_for_platform():
 def param_vec(name_value_pair):
     """
     Generates a string command line parameter string for sbsrender
-
     :param name_value_pair: name and value of the parameter set as a tuple
     :type name_value_pair: (string, [val])
     :return: string The parameter merged with its value in a batch processor compatible way
@@ -34,28 +43,13 @@ def param_vec(name_value_pair):
     name, value = name_value_pair
     return ('%s@' % name) + ','.join(map(str, value))
 
-def render_maps(material_name, output, params, permutation, sbsar_file, output_size, output_path, use_gpu_engine, output_fmt):
+def render_maps(output, params, sbsar_file, output_path, output_filename, output_size, output_fmt, use_gpu_engine):
     """
     Invokes sbsrender to render out maps for a material with a set of parameters
-
-    :param material_name: name of the material being rendered
-    :type material_name: string
     :param output: name of the output node to be rendered
     :type output: string
     :param params: Instantiated parameters
     :type params: {string: [...]}
-    :param permutation: Current permutation
-    :type permutation: int
-    :param sbsar_file: The sbsar file to render
-    :type sbsar_file: string
-    :param output_size: the output size for the rendered image. In format 2^n where n is the parameter
-    :type output_size: int
-    :param output_path: The directory to put the result
-    :type output_path: string
-    :param use_gpu_engine: Use GPU engine when rendering
-    :type use_gpu_engine: bool
-
-    :return: None
     """
     random_number = rd.uniform(0, 10000)
     values = ['$outputsize@%d,%d' % (output_size, output_size),
@@ -63,70 +57,124 @@ def render_maps(material_name, output, params, permutation, sbsar_file, output_s
     engine_params = {'engine' : get_gpu_engine_for_platform()} if use_gpu_engine else {}
     batchtools.sbsrender_render(inputs=sbsar_file,
                                 output_path=output_path,
-                                output_name='{outputNodeName}_%s_%d' % (material_name, permutation),
+                                output_name='%s' % (output_filename),
                                 input_graph_output=output,
                                 set_value=values,
                                 output_format=output_fmt,
                                 **(engine_params)).wait()
 
+def saturate( a ):
+    return numpy.clip( a, 0.0, 1.0 )
 
-def calc( input_color, levelinlow, levelinhigh, levelinmid, leveloutlow, levelouthigh ):
-    a = min(1, max(0, (numpy.floor(input_color*255)/255 - levelinlow) / ((levelinhigh - levelinlow) if levelinhigh != levelinlow else 1) ))
-    b = numpy.abs(levelinmid-0.5)*16+1
-    c = numpy.power( a, numpy.power( b, numpy.sign(levelinmid - 0.5) ) ) * (levelouthigh - leveloutlow) + leveloutlow
+def calc( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInput, _fLevelinmid ):
+ 
+    sgn = 1.0 if _fLevelinlow <= _fLevelinhigh else -1.0
 
-    return numpy.round( c * 255 - 0.01 )
+    if (_fInput == 0 and _fInput == _fLevelinlow):
+        c_0 = 0.0
+    elif (_fInput == _fLevelinhigh):
+        c_0 = 1.0
+    elif (_fInput * sgn) <= (_fLevelinlow * sgn):
+        c_0 = 0.0
+    elif (_fInput * sgn) >= (_fLevelinhigh * sgn):
+        c_0 = 1.0
+    else:
+        a = saturate( (_fInput - _fLevelinlow) / (_fLevelinhigh - _fLevelinlow) )
+        b = numpy.abs(_fLevelinmid - 0.5) * 16 + 1
+        c_0 = numpy.power( a, numpy.power( b, numpy.sign(_fLevelinmid - 0.5) ) )
 
+    c = c_0 * (_fLevelouthigh - _fLeveloutlow) + _fLeveloutlow
+
+    return numpy.round( c * 255.0 - 0.01 )
+    #return numpy.round( c * 255.0 )
+    #return numpy.floor( c * 255.0 )
+
+def thread_func( _uIdx ):
+    strFilename = str(_uIdx)
+
+    uIdx = _uIdx
+    uLevelinlow = uIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+    uIdx -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+    uLevelinhigh = uIdx / Y_PARAM_STEP_NUM
+    uIdx -= uLevelinhigh * Y_PARAM_STEP_NUM
+    uLeveloutlow = uIdx
+    
+    fp = open( Y_OUTPUT_PATH_LOG + strFilename + '.txt' , 'w')
+    fp.write( 'levelinlow, levelinhigh, leveloutlow, levelouthigh, input, levelinmid, sd, my, my-sd\n' )
+
+    fLevelinlow  = uLevelinlow  / Y_PARAM_STEP_NUM
+    fLevelinhigh = uLevelinhigh / Y_PARAM_STEP_NUM
+    fLeveloutlow = uLeveloutlow / Y_PARAM_STEP_NUM
+
+    for uLevelouthigh in range( Y_PARAM_STEP_NUM ):
+        fLevelouthigh = uLevelouthigh * Y_PARAM_STEP
+        if fLevelouthigh != 1.0: continue
+
+        for uInput in range( Y_PARAM_STEP_NUM ):
+            fInput = uInput * Y_PARAM_STEP
+
+            for uLevelinmid in range( Y_PARAM_STEP_NUM ):
+                fLevelinmid = uLevelinmid * Y_PARAM_STEP
+                if fLevelinmid != 0.5: continue
+                
+                fInputModified = numpy.floor(fInput*255.0)/255.0
+
+                render_maps(
+                    'basecolor',
+                    {
+                        'input_color':[fInputModified],
+                        'levelinlow':[fLevelinlow],
+                        'levelinhigh':[fLevelinhigh],
+                        'levelinmid':[fLevelinmid],
+                        'leveloutlow':[fLeveloutlow],
+                        'levelouthigh':[fLevelouthigh]
+                    },
+                    './Levels_Node.sbsar',
+                    Y_OUTPUT_PATH_IMG,
+                    strFilename,
+                    16,
+                    Y_OUTPUT_IMG_EXT,
+                    True
+                )
+
+                img = Image.open( Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT )
+
+                sd = img.getpixel((0,0))
+                my = calc( fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid )
+
+                # ファイルをにぎりっぱなしになるのでいちいち削除
+                del img
+                gc.collect()
+
+                # ちょっといったん差分がすぐないのは除外する
+                if abs(sd-my) <2: continue
+                
+                fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' %(('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
+
+    fp.close()
 
 # main
+if __name__=='__main__':
 
-fp = open('log.txt', 'w')
+    tst = calc( 0.05, 0.05, 0.0, 1.0, 0.05, 0.5 )
 
-for _input_color in range(0, 101, 5):
-    for _levelinlow in range(0, 6, 5):
-        for _levelinhigh in range(0,6,5):
-            for _levelinmid in range(0,6,5):
-                for _leveloutlow in range(0,6,5):
-                    for _levelouthigh in range(0,6,5):
+    if os.path.exists( Y_OUTPUT_PATH_BASE ):
+        shutil.rmtree( Y_OUTPUT_PATH_BASE )
+    os.makedirs( Y_OUTPUT_PATH_LOG )
+    os.makedirs( Y_OUTPUT_PATH_IMG )
 
-                        if _levelinlow == _levelinhigh:
-                            continue
+    for ulevelinlow in range( Y_PARAM_STEP_NUM ):
+        for ulevelinhigh in range( Y_PARAM_STEP_NUM ):
+            for uleveloutlow in range( Y_PARAM_STEP_NUM ):
+                fLeveloutlow = uleveloutlow * Y_PARAM_STEP
+                if fLeveloutlow != 0.5: continue
+                
+                if Y_USE_MULTITHREAD:
+                    p = Pool( multi.cpu_count() )
+                    p.map( thread_func, list( range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ) ) )
+                    p.close()
+                else:
+                    for idx in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ):
+                        thread_func(idx)
 
-                        input_color = _input_color * 0.01
-                        levelinlow = _levelinlow * 0.01
-                        levelinhigh = _levelinhigh * 0.01
-                        levelinmid = _levelinmid * 0.01
-                        leveloutlow = _leveloutlow * 0.01
-                        levelouthigh = _levelouthigh * 0.01
 
-                        render_maps(
-                            'mat',
-                            'basecolor',
-                            {
-                                'input_color':[input_color],
-                                'levelinlow':[levelinlow],
-                                'levelinhigh':[levelinhigh],
-                                'levelinmid':[levelinmid],
-                                'leveloutlow':[leveloutlow],
-                                'levelouthigh':[levelouthigh]
-                            },
-                            0,
-                            'Levels_Node.sbsar',
-                            16,
-                            './',
-                            True,
-                            'tga'
-                        )
-
-                        img = Image.open('basecolor_mat_' + str(0) + '.tga')
-
-                        sd = img.getpixel((0,0))
-                        my = calc( input_color, levelinlow, levelinhigh, levelinmid, leveloutlow, levelouthigh )
-
-                        #ファイルをにぎりっぱなしになるのでいちいち削除
-                        del img
-                        gc.collect()
-
-                        fp.write( format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' % (('OK' if sd==my else 'NG'), input_color, levelinlow, levelinhigh, levelinmid, leveloutlow, levelouthigh, sd, my, my-sd)) )
-
-fp.close()
