@@ -7,10 +7,13 @@ import numpy
 import random as rd
 from pysbs import context, sbsenum, sbsarchive, batchtools
 from PIL import Image
-from multiprocessing import Pool
+from multiprocessing import Pool, Value
 import multiprocessing as multi
 
-Y_USE_MULTITHREAD   = True
+Y_USE_MULTITHREAD   = True      # MultiThread実行する？
+Y_USE_PARAM_LIMITED = True     # leveloutlow=0.0, leveouthigh=1.0, levelinmid=0.5 に限定する？
+Y_USE_DELTA_UPDATE  = True
+
 Y_OUTPUT_PATH_BASE  = './tmp/'
 Y_OUTPUT_PATH_LOG   = Y_OUTPUT_PATH_BASE + 'log/'
 Y_OUTPUT_PATH_IMG   = Y_OUTPUT_PATH_BASE + 'img/'
@@ -89,17 +92,22 @@ def calc( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInput, _
     #return numpy.round( c * 255.0 )
     #return numpy.floor( c * 255.0 )
 
-def thread_func( _uIdx ):
-    strFilename = str(_uIdx)
+def thread_func( _uGlobalIdx, _uLocalIdx ):
+    strFilename = format( "%04d_%04d" % (_uGlobalIdx, _uLocalIdx) )
 
-    uIdx = _uIdx
-    uLevelinlow = uIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
-    uIdx -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
-    uLevelinhigh = uIdx / Y_PARAM_STEP_NUM
-    uIdx -= uLevelinhigh * Y_PARAM_STEP_NUM
-    uLeveloutlow = uIdx
+    uLocalIdx = _uLocalIdx
+    uLevelinlow = uLocalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+    uLocalIdx -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+    uLevelinhigh = uLocalIdx / Y_PARAM_STEP_NUM
+    uLocalIdx -= uLevelinhigh * Y_PARAM_STEP_NUM
+    uLeveloutlow = uLocalIdx
     
-    fp = open( Y_OUTPUT_PATH_LOG + strFilename + '.txt' , 'w')
+    strFilePathLog = Y_OUTPUT_PATH_LOG + strFilename + '.txt'
+
+    if Y_USE_DELTA_UPDATE:
+       if os.path.exists( strFilePathLog ): return
+
+    fp = open( strFilePathLog , 'w' )
     fp.write( 'levelinlow, levelinhigh, leveloutlow, levelouthigh, input, levelinmid, sd, my, my-sd\n' )
 
     fLevelinlow  = uLevelinlow  / Y_PARAM_STEP_NUM
@@ -108,14 +116,14 @@ def thread_func( _uIdx ):
 
     for uLevelouthigh in range( Y_PARAM_STEP_NUM ):
         fLevelouthigh = uLevelouthigh * Y_PARAM_STEP
-        if fLevelouthigh != 1.0: continue
+        if (Y_USE_PARAM_LIMITED and fLevelouthigh != 1.0): continue
 
         for uInput in range( Y_PARAM_STEP_NUM ):
             fInput = uInput * Y_PARAM_STEP
 
             for uLevelinmid in range( Y_PARAM_STEP_NUM ):
                 fLevelinmid = uLevelinmid * Y_PARAM_STEP
-                if fLevelinmid != 0.5: continue
+                if (Y_USE_PARAM_LIMITED and fLevelinmid != 0.5): continue
                 
                 fInputModified = numpy.floor(fInput*255.0)/255.0
 
@@ -137,7 +145,8 @@ def thread_func( _uIdx ):
                     True
                 )
 
-                img = Image.open( Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT )
+                strFilePathImg = Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT
+                img = Image.open( strFilePathImg )
 
                 sd = img.getpixel((0,0))
                 my = calc( fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid )
@@ -147,34 +156,38 @@ def thread_func( _uIdx ):
                 gc.collect()
 
                 # ちょっといったん差分がすぐないのは除外する
-                if abs(sd-my) <2: continue
+                #if abs(sd-my) <2: continue
                 
-                fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' %(('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
+                fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' % (('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
 
     fp.close()
+
+def thread_func_wrapper( _args ):
+    thread_func( *_args )
 
 # main
 if __name__=='__main__':
 
-    tst = calc( 0.05, 0.05, 0.0, 1.0, 0.05, 0.5 )
+    if Y_USE_DELTA_UPDATE == False:
+        if os.path.exists( Y_OUTPUT_PATH_BASE ):
+            shutil.rmtree( Y_OUTPUT_PATH_BASE )
+        os.makedirs( Y_OUTPUT_PATH_LOG )
+        os.makedirs( Y_OUTPUT_PATH_IMG )
 
-    if os.path.exists( Y_OUTPUT_PATH_BASE ):
-        shutil.rmtree( Y_OUTPUT_PATH_BASE )
-    os.makedirs( Y_OUTPUT_PATH_LOG )
-    os.makedirs( Y_OUTPUT_PATH_IMG )
+    uGlobalIdx = 0
 
     for ulevelinlow in range( Y_PARAM_STEP_NUM ):
         for ulevelinhigh in range( Y_PARAM_STEP_NUM ):
             for uleveloutlow in range( Y_PARAM_STEP_NUM ):
                 fLeveloutlow = uleveloutlow * Y_PARAM_STEP
-                if fLeveloutlow != 0.5: continue
+                if (Y_USE_PARAM_LIMITED and fLeveloutlow != 0.0): continue
                 
                 if Y_USE_MULTITHREAD:
                     p = Pool( multi.cpu_count() )
-                    p.map( thread_func, list( range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ) ) )
+                    p.map( thread_func_wrapper, [(uGlobalIdx, i) for i in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM )] )
                     p.close()
                 else:
-                    for idx in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ):
-                        thread_func(idx)
+                    for uLocalIdx in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ):
+                        thread_func(uGlobalIdx, uLocalIdx)
 
-
+                uGlobalIdx += 1
