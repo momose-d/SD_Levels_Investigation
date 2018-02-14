@@ -11,15 +11,17 @@ from multiprocessing import Pool, Value
 import multiprocessing as multi
 
 Y_USE_MULTITHREAD   = True      # MultiThread実行する？
-Y_USE_PARAM_LIMITED = True     # leveloutlow=0.0, leveouthigh=1.0, levelinmid=0.5 に限定する？
-Y_USE_DELTA_UPDATE  = True
+Y_USE_PARAM_LIMITED = True      # leveloutlow=0.0, leveouthigh=1.0, levelinmid=0.5 に限定する？
+Y_USE_NO_OVERWRITE  = True      # 既にファイルが存在しているものは上書きしない
+Y_USE_RANDOM_SAMPLE = False and not Y_USE_PARAM_LIMITED      # ランダムサンプリングする
 
-Y_OUTPUT_PATH_BASE  = './tmp/'
-Y_OUTPUT_PATH_LOG   = Y_OUTPUT_PATH_BASE + 'log/'
-Y_OUTPUT_PATH_IMG   = Y_OUTPUT_PATH_BASE + 'img/'
-Y_OUTPUT_IMG_EXT    = 'tga'
-Y_PARAM_STEP        = 0.05
-Y_PARAM_STEP_NUM    = int(1.0 / Y_PARAM_STEP) + 1
+Y_OUTPUT_PATH_BASE      = './tmp/'
+Y_OUTPUT_PATH_LOG       = Y_OUTPUT_PATH_BASE + 'log/'
+Y_OUTPUT_PATH_IMG       = Y_OUTPUT_PATH_BASE + 'img/'
+Y_OUTPUT_IMG_EXT        = 'tga'
+Y_PARAM_STEP            = 0.05
+Y_PARAM_STEP_NUM        = int(1.0 / Y_PARAM_STEP) + 1
+Y_PARAM_STEP_NUM_THREAD = Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
 
 def get_gpu_engine_for_platform():
     """
@@ -69,7 +71,7 @@ def render_maps(output, params, sbsar_file, output_path, output_filename, output
 def saturate( a ):
     return numpy.clip( a, 0.0, 1.0 )
 
-def calc( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInput, _fLevelinmid ):
+def SD_Levels( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInput, _fLevelinmid ):
  
     sgn = 1.0 if _fLevelinlow <= _fLevelinhigh else -1.0
 
@@ -92,102 +94,102 @@ def calc( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInput, _
     #return numpy.round( c * 255.0 )
     #return numpy.floor( c * 255.0 )
 
-def thread_func( _uGlobalIdx, _uLocalIdx ):
-    strFilename = format( "%04d_%04d" % (_uGlobalIdx, _uLocalIdx) )
-
-    uLocalIdx = _uLocalIdx
-    uLevelinlow = uLocalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
-    uLocalIdx -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
-    uLevelinhigh = uLocalIdx / Y_PARAM_STEP_NUM
-    uLocalIdx -= uLevelinhigh * Y_PARAM_STEP_NUM
-    uLeveloutlow = uLocalIdx
-    
+def thread_func( _uGlobalIdx ):
+    strFilename = format( "%04d" % _uGlobalIdx )
     strFilePathLog = Y_OUTPUT_PATH_LOG + strFilename + '.txt'
 
-    if Y_USE_DELTA_UPDATE:
+    if Y_USE_NO_OVERWRITE:
        if os.path.exists( strFilePathLog ): return
-
     fp = open( strFilePathLog , 'w' )
     fp.write( 'levelinlow, levelinhigh, leveloutlow, levelouthigh, input, levelinmid, sd, my, my-sd\n' )
 
-    fLevelinlow  = uLevelinlow  / Y_PARAM_STEP_NUM
-    fLevelinhigh = uLevelinhigh / Y_PARAM_STEP_NUM
-    fLeveloutlow = uLeveloutlow / Y_PARAM_STEP_NUM
+    if Y_USE_RANDOM_SAMPLE:
+        uGlobalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
+    else:
+        uGlobalIdx = _uGlobalIdx
 
-    for uLevelouthigh in range( Y_PARAM_STEP_NUM ):
-        fLevelouthigh = uLevelouthigh * Y_PARAM_STEP
+    uLevelinlow  = uGlobalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+    uGlobalIdx  -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+    uLevelinhigh = uGlobalIdx / Y_PARAM_STEP_NUM
+    uGlobalIdx  -= uLevelinhigh * Y_PARAM_STEP_NUM
+    uLeveloutlow = uGlobalIdx
+
+    fLevelinlow  = float(uLevelinlow)  / (Y_PARAM_STEP_NUM - 1)
+    fLevelinhigh = float(uLevelinhigh) / (Y_PARAM_STEP_NUM - 1)
+    fLeveloutlow = float(uLeveloutlow) / (Y_PARAM_STEP_NUM - 1)
+
+    for _uLocalIdx in range( Y_PARAM_STEP_NUM_THREAD ):
+        if Y_USE_RANDOM_SAMPLE:
+            uLocalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
+        else:
+            uLocalIdx = _uLocalIdx
+
+        uLevelouthigh = uLocalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+        uLocalIdx    -= uLevelouthigh * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+        uInput        = uLocalIdx / Y_PARAM_STEP_NUM
+        uLocalIdx    -= uInput * Y_PARAM_STEP_NUM
+        uLevelinmid   = uLocalIdx
+
+        fLevelouthigh = float(uLevelouthigh) / (Y_PARAM_STEP_NUM - 1)
+        fInput        = float(uInput)        / (Y_PARAM_STEP_NUM - 1)
+        fLevelinmid   = float(uLevelinmid)   / (Y_PARAM_STEP_NUM - 1)
+        
         if (Y_USE_PARAM_LIMITED and fLevelouthigh != 1.0): continue
-
-        for uInput in range( Y_PARAM_STEP_NUM ):
-            fInput = uInput * Y_PARAM_STEP
-
-            for uLevelinmid in range( Y_PARAM_STEP_NUM ):
-                fLevelinmid = uLevelinmid * Y_PARAM_STEP
-                if (Y_USE_PARAM_LIMITED and fLevelinmid != 0.5): continue
+        if (Y_USE_PARAM_LIMITED and fLevelinmid != 0.5): continue
                 
-                fInputModified = numpy.floor(fInput*255.0)/255.0
+        fInputModified = numpy.floor(fInput*255.0)/255.0
 
-                render_maps(
-                    'basecolor',
-                    {
-                        'input_color':[fInputModified],
-                        'levelinlow':[fLevelinlow],
-                        'levelinhigh':[fLevelinhigh],
-                        'levelinmid':[fLevelinmid],
-                        'leveloutlow':[fLeveloutlow],
-                        'levelouthigh':[fLevelouthigh]
-                    },
-                    './Levels_Node.sbsar',
-                    Y_OUTPUT_PATH_IMG,
-                    strFilename,
-                    16,
-                    Y_OUTPUT_IMG_EXT,
-                    True
-                )
+        render_maps(
+            'basecolor',
+            {
+                'input_color':[fInputModified],
+                'levelinlow':[fLevelinlow],
+                'levelinhigh':[fLevelinhigh],
+                'levelinmid':[fLevelinmid],
+                'leveloutlow':[fLeveloutlow],
+                'levelouthigh':[fLevelouthigh]
+            },
+            './Levels_Node.sbsar',
+            Y_OUTPUT_PATH_IMG,
+            strFilename,
+            16,
+            Y_OUTPUT_IMG_EXT,
+            True
+        )
 
-                strFilePathImg = Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT
-                img = Image.open( strFilePathImg )
+        strFilePathImg = Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT
+        img = Image.open( strFilePathImg )
 
-                sd = img.getpixel((0,0))
-                my = calc( fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid )
+        sd = img.getpixel((0,0))
+        my = SD_Levels( fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid )
 
-                # ファイルをにぎりっぱなしになるのでいちいち削除
-                del img
-                gc.collect()
+        # ファイルをにぎりっぱなしになるのでいちいち削除
+        del img
+        gc.collect()
 
-                # ちょっといったん差分がすぐないのは除外する
-                #if abs(sd-my) <2: continue
-                
-                fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' % (('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
+        # ちょっといったん差分がすぐないのは除外する
+        #if abs(sd-my) <2: continue
+        
+        fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' % (('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
 
     fp.close()
-
-def thread_func_wrapper( _args ):
-    thread_func( *_args )
 
 # main
 if __name__=='__main__':
 
-    if Y_USE_DELTA_UPDATE == False:
+    if not Y_USE_NO_OVERWRITE:
         if os.path.exists( Y_OUTPUT_PATH_BASE ):
             shutil.rmtree( Y_OUTPUT_PATH_BASE )
+
+    if not os.path.exists( Y_OUTPUT_PATH_LOG ):
         os.makedirs( Y_OUTPUT_PATH_LOG )
+    if not os.path.exists( Y_OUTPUT_PATH_IMG ):
         os.makedirs( Y_OUTPUT_PATH_IMG )
 
-    uGlobalIdx = 0
-
-    for ulevelinlow in range( Y_PARAM_STEP_NUM ):
-        for ulevelinhigh in range( Y_PARAM_STEP_NUM ):
-            for uleveloutlow in range( Y_PARAM_STEP_NUM ):
-                fLeveloutlow = uleveloutlow * Y_PARAM_STEP
-                if (Y_USE_PARAM_LIMITED and fLeveloutlow != 0.0): continue
-                
-                if Y_USE_MULTITHREAD:
-                    p = Pool( multi.cpu_count() )
-                    p.map( thread_func_wrapper, [(uGlobalIdx, i) for i in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM )] )
-                    p.close()
-                else:
-                    for uLocalIdx in range( Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM ):
-                        thread_func(uGlobalIdx, uLocalIdx)
-
-                uGlobalIdx += 1
+    if Y_USE_MULTITHREAD:
+        p = Pool( multi.cpu_count() )
+        p.map( thread_func, list( range( Y_PARAM_STEP_NUM_THREAD ) ) )
+        p.close()
+    else:
+        for uLocalIdx in range( Y_PARAM_STEP_NUM_THREAD ):
+            thread_func( uLocalIdx )
