@@ -11,17 +11,16 @@ from multiprocessing import Pool, Value
 import multiprocessing as multi
 
 Y_USE_MULTITHREAD   = True      # MultiThread実行する？
-Y_USE_PARAM_LIMITED = True      # leveloutlow=0.0, leveouthigh=1.0, levelinmid=0.5 に限定する？
+Y_USE_PARAM_LIMITED = False      # leveloutlow=0.0, leveouthigh=1.0, levelinmid=0.5 に限定する？
 Y_USE_NO_OVERWRITE  = True      # 既にファイルが存在しているものは上書きしない
-Y_USE_RANDOM_SAMPLE = False and not Y_USE_PARAM_LIMITED      # ランダムサンプリングする
+Y_USE_RANDOM_SAMPLE = True and not Y_USE_PARAM_LIMITED      # ランダムサンプリングする
 
 Y_OUTPUT_PATH_BASE      = './tmp/'
 Y_OUTPUT_PATH_LOG       = Y_OUTPUT_PATH_BASE + 'log/'
 Y_OUTPUT_PATH_IMG       = Y_OUTPUT_PATH_BASE + 'img/'
 Y_OUTPUT_IMG_EXT        = 'tga'
-Y_PARAM_STEP            = 0.05
-Y_PARAM_STEP_NUM        = int(1.0 / Y_PARAM_STEP) + 1
-Y_PARAM_STEP_NUM_THREAD = Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+Y_PARAM_STEP_NUM        = int(1.0 / 0.05) + 1 if not Y_USE_RANDOM_SAMPLE else 8#5     # 1パラメータ調査数
+Y_PARAM_STEP_NUM_THREAD = Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM    # 1スレッドが扱う、総パラメータ調査数
 
 def get_gpu_engine_for_platform():
     """
@@ -75,40 +74,43 @@ def SD_Levels( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInp
  
     sgn = 1.0 if _fLevelinlow <= _fLevelinhigh else -1.0
 
-    if (_fInput == 0 and _fInput == _fLevelinlow):
-        c_0 = 0.0
-    elif (_fInput == _fLevelinhigh):
-        c_0 = 1.0
-    elif (_fInput * sgn) <= (_fLevelinlow * sgn):
+    if (_fLevelinlow == _fLevelinhigh == _fInput):
         c_0 = 0.0
     elif (_fInput * sgn) >= (_fLevelinhigh * sgn):
         c_0 = 1.0
+    elif (_fInput * sgn) <= (_fLevelinlow * sgn):
+        c_0 = 0.0
     else:
         a = saturate( (_fInput - _fLevelinlow) / (_fLevelinhigh - _fLevelinlow) )
         b = numpy.abs(_fLevelinmid - 0.5) * 16 + 1
         c_0 = numpy.power( a, numpy.power( b, numpy.sign(_fLevelinmid - 0.5) ) )
-
+ 
     c = c_0 * (_fLevelouthigh - _fLeveloutlow) + _fLeveloutlow
+    #c = round( c_0, 3 )
+    c255 = c * 255.0
 
-    return numpy.round( c * 255.0 - 0.01 )
-    #return numpy.round( c * 255.0 )
-    #return numpy.floor( c * 255.0 )
+    #return numpy.round( c255 - 0.01 )
+    return numpy.round( c255 )
+    #return numpy.floor( c255 )
 
 def thread_func( _uGlobalIdx ):
     if Y_USE_RANDOM_SAMPLE:
-        uGlobalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
+        fLevelinlow  = numpy.random.random()
+        fLevelinhigh = numpy.random.random()
+        fLeveloutlow = numpy.random.random()
     else:
-        uGlobalIdx = _uGlobalIdx
+        uGlobalIdx   = _uGlobalIdx
 
-    uLevelinlow  = uGlobalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
-    uGlobalIdx  -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
-    uLevelinhigh = uGlobalIdx / Y_PARAM_STEP_NUM
-    uGlobalIdx  -= uLevelinhigh * Y_PARAM_STEP_NUM
-    uLeveloutlow = uGlobalIdx
+        uLevelinlow  = uGlobalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+        uGlobalIdx  -= uLevelinlow * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+        uLevelinhigh = uGlobalIdx / Y_PARAM_STEP_NUM
+        uGlobalIdx  -= uLevelinhigh * Y_PARAM_STEP_NUM
+        uLeveloutlow = uGlobalIdx
 
-    fLevelinlow  = float(uLevelinlow)  / (Y_PARAM_STEP_NUM - 1)
-    fLevelinhigh = float(uLevelinhigh) / (Y_PARAM_STEP_NUM - 1)
-    fLeveloutlow = float(uLeveloutlow) / (Y_PARAM_STEP_NUM - 1)
+        fLevelinlow  = float(uLevelinlow)  / (Y_PARAM_STEP_NUM - 1)
+        fLevelinhigh = float(uLevelinhigh) / (Y_PARAM_STEP_NUM - 1)
+        fLeveloutlow = float(uLeveloutlow) / (Y_PARAM_STEP_NUM - 1)
+
     if (Y_USE_PARAM_LIMITED and fLeveloutlow != 0.0): return
 
     #
@@ -123,19 +125,21 @@ def thread_func( _uGlobalIdx ):
     #
     for _uLocalIdx in range( Y_PARAM_STEP_NUM_THREAD ):
         if Y_USE_RANDOM_SAMPLE:
-            uLocalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
+            fLevelouthigh = numpy.random.random()
+            fInput        = numpy.random.random()
+            fLevelinmid   = numpy.random.random()
         else:
-            uLocalIdx = _uLocalIdx
+            uLocalIdx     = _uLocalIdx
 
-        uLevelouthigh = uLocalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
-        uLocalIdx    -= uLevelouthigh * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
-        uInput        = uLocalIdx / Y_PARAM_STEP_NUM
-        uLocalIdx    -= uInput * Y_PARAM_STEP_NUM
-        uLevelinmid   = uLocalIdx
+            uLevelouthigh = uLocalIdx / Y_PARAM_STEP_NUM / Y_PARAM_STEP_NUM
+            uLocalIdx    -= uLevelouthigh * Y_PARAM_STEP_NUM * Y_PARAM_STEP_NUM
+            uInput        = uLocalIdx / Y_PARAM_STEP_NUM
+            uLocalIdx    -= uInput * Y_PARAM_STEP_NUM
+            uLevelinmid   = uLocalIdx
 
-        fLevelouthigh = float(uLevelouthigh) / (Y_PARAM_STEP_NUM - 1)
-        fInput        = float(uInput)        / (Y_PARAM_STEP_NUM - 1)
-        fLevelinmid   = float(uLevelinmid)   / (Y_PARAM_STEP_NUM - 1)
+            fLevelouthigh = float(uLevelouthigh) / (Y_PARAM_STEP_NUM - 1)
+            fInput        = float(uInput)        / (Y_PARAM_STEP_NUM - 1)
+            fLevelinmid   = float(uLevelinmid)   / (Y_PARAM_STEP_NUM - 1)
         
         if (Y_USE_PARAM_LIMITED and fLevelouthigh != 1.0): continue
         if (Y_USE_PARAM_LIMITED and fLevelinmid != 0.5): continue
@@ -150,7 +154,7 @@ def thread_func( _uGlobalIdx ):
                 'levelinhigh':[fLevelinhigh],
                 'levelinmid':[fLevelinmid],
                 'leveloutlow':[fLeveloutlow],
-                'levelouthigh':[fLevelouthigh]
+                'levelouthigh':[fLevelouthigh],
             },
             './Levels_Node.sbsar',
             Y_OUTPUT_PATH_IMG,
@@ -166,11 +170,10 @@ def thread_func( _uGlobalIdx ):
         sd = img.getpixel((0,0))
         my = SD_Levels( fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid )
 
-        # ファイルをにぎりっぱなしになるのでいちいち削除
+        # ファイルを手放して欲しいので明示的に削除
         del img
         gc.collect()
-
-        # ちょっといったん差分がすぐないのは除外する
+        # ちょっといったん差分がすくないのは除外する
         #if abs(sd-my) <2: continue
         
         fp.write(format('%s,%f,%f,%f,%f,%f,%f,sd,%d,my,%d,dif,%d\n' % (('OK' if sd==my else 'NG'), fLevelinlow, fLevelinhigh, fLeveloutlow, fLevelouthigh, fInputModified, fLevelinmid, sd, my, my-sd)) )
@@ -188,6 +191,37 @@ if __name__=='__main__':
         os.makedirs( Y_OUTPUT_PATH_LOG )
     if not os.path.exists( Y_OUTPUT_PATH_IMG ):
         os.makedirs( Y_OUTPUT_PATH_IMG )
+
+    """
+    prms = (0.050000,0.550000,0.000000,1.000000,0.200000,0.500000)
+    strFilename = "unittest"
+    render_maps(
+    'basecolor',
+    {
+        'input_color':[prms[4]],
+        'levelinlow':[prms[0]],
+        'levelinhigh':[prms[1]],
+        'levelinmid':[prms[5]],
+        'leveloutlow':[prms[2]],
+        'levelouthigh':[prms[3]],
+    },
+    './Levels_Node.sbsar',
+    Y_OUTPUT_PATH_IMG,
+    strFilename,
+    16,
+    Y_OUTPUT_IMG_EXT,
+    True
+    )
+
+    strFilePathImg = Y_OUTPUT_PATH_IMG + strFilename + '.' + Y_OUTPUT_IMG_EXT
+    img = Image.open( strFilePathImg )
+
+    sd = img.getpixel((0,0))
+    my = SD_Levels( prms[0], prms[1], prms[2], prms[3], prms[4], prms[5] )
+
+    del img
+    gc.collect()   
+    """
 
     if Y_USE_MULTITHREAD:
         p = Pool( multi.cpu_count() )
