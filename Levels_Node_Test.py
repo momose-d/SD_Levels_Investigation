@@ -95,14 +95,6 @@ def SD_Levels( _fLevelinlow, _fLevelinhigh, _fLeveloutlow, _fLevelouthigh, _fInp
     #return numpy.floor( c * 255.0 )
 
 def thread_func( _uGlobalIdx ):
-    strFilename = format( "%04d" % _uGlobalIdx )
-    strFilePathLog = Y_OUTPUT_PATH_LOG + strFilename + '.txt'
-
-    if Y_USE_NO_OVERWRITE:
-       if os.path.exists( strFilePathLog ): return
-    fp = open( strFilePathLog , 'w' )
-    fp.write( 'levelinlow, levelinhigh, leveloutlow, levelouthigh, input, levelinmid, sd, my, my-sd\n' )
-
     if Y_USE_RANDOM_SAMPLE:
         uGlobalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
     else:
@@ -117,7 +109,18 @@ def thread_func( _uGlobalIdx ):
     fLevelinlow  = float(uLevelinlow)  / (Y_PARAM_STEP_NUM - 1)
     fLevelinhigh = float(uLevelinhigh) / (Y_PARAM_STEP_NUM - 1)
     fLeveloutlow = float(uLeveloutlow) / (Y_PARAM_STEP_NUM - 1)
+    if (Y_USE_PARAM_LIMITED and fLeveloutlow != 0.0): return
 
+    #
+    strFilename = format( "%04d" % _uGlobalIdx )
+    strFilePathLog = Y_OUTPUT_PATH_LOG + strFilename + '.txt'
+
+    if Y_USE_NO_OVERWRITE:
+       if os.path.exists( strFilePathLog ): return
+    fp = open( strFilePathLog , 'w' )
+    fp.write( 'levelinlow, levelinhigh, leveloutlow, levelouthigh, input, levelinmid, sd, my, my-sd\n' )
+
+    #
     for _uLocalIdx in range( Y_PARAM_STEP_NUM_THREAD ):
         if Y_USE_RANDOM_SAMPLE:
             uLocalIdx = int( numpy.random.random() * (Y_PARAM_STEP_NUM_THREAD - 1) )
